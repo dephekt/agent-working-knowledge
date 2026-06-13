@@ -23,12 +23,12 @@ multi-site, industrial-style control system. **Sites:** Daniel (home) + Greg
 ## Status snapshot
 
 !!! note ""
-    **Decisions pinned:** 24  ·  **Open forks:** 4  ·  **Deferred / out of scope:** 5
+    **Decisions pinned:** 25  ·  **Open forks:** 3  ·  **Deferred / out of scope:** 5
     ·  **Phases sketched:** 7
 
     **Status:** architecture shape agreed; symmetric N+1 sites + a self-hostable
     central console pinned; client/auth strategy affirmed (confidential BFF +
-    server-capable framework, configurable IdP). Not yet planned to tasks. No
+    server-capable framework — SvelteKit/Svelte 5, configurable IdP). Not yet planned to tasks. No
     code written. Next concrete step is Phase 0 (stand up Daniel's site broker +
     prove ESPHome MQTT telemetry from the AtomS3U bench rig).
 
@@ -325,12 +325,13 @@ flowchart TB
 22. <span class="badge badge-decided">decided</span> **No site is special — symmetric N+1.** Every site (Daniel's included) is the same unit: edge + local broker + grow-app(site) + grow-rules, optionally bridging up to a central console. The console is co-located on media-server *today* (separate containers, loopback bridge) but is a distinct **role**, liftable — Daniel's site stack moves to dedicated HW (the repurposed HA Pi 4) via a remote Docker context, making his site identical to Greg's and isolating his grow from media-server maintenance. Resolves the collapsed-vs-symmetric topology question and fork 4.
 23. <span class="badge badge-decided">decided</span> **The central console is a self-hostable role — federation is a pinned goal.** OSS repos; anyone can run their own console on a VPS and point a site at it (or at no console). Forces: the central app authenticates against a **configurable** OIDC provider (not a hardcoded Keycloak), the site↔console link is generic (any endpoint), and the shared units carry no dephekt-specific assumptions. Anti-lock-in is the thesis — the open inversion of Pulse Grow.
 24. <span class="badge badge-decided">decided</span> **Config-as-source-of-truth; the UI is a generator over it.** Central-management settings (remote broker endpoint + creds, IdP info, site identity) are a declarative config (YAML or similar) that the app consumes. A "Remote Management" area in grow-app gives regular users a rich UI to enter them; power users / automated deploys hand-author or supply the config file directly. Both paths converge on the same generated artifact — the UI never becomes a second source of truth.
+25. <span class="badge badge-decided">decided</span> **grow-app frontend = SvelteKit (Svelte 5).** Resolves fork 3. Chosen over Next.js for lower boilerplate (a non-frontend owner can read and maintain the source), language-native reactivity that suits live MQTT telemetry (a value arriving → the UI updating is nearly free), and lighter bundles for the Tab5 kiosk + phones. The one real cost — coding agents blending deprecated Svelte 4 idioms with Svelte 5 **runes** — is mitigated by a Svelte-5-only guardrail lifted into grow-app's `AGENTS.md` at scaffold time (see §14) plus a pinned `svelte@^5` major. The server-capable BFF architecture (decision 21) is unchanged: SvelteKit *is* the server, in two run-modes (decision 8).
 
 ## 10. Open threads / forks
 
 1.  <span class="badge badge-open">open</span> **Site-hub hardware** — Pi 5 vs N100 mini-PC (N100 can also host an edge Influx buffer; Pi is cheaper/lower-power). Applies to Daniel too now (decision 22): the repurposed HA **Pi 4** is the leading candidate for his site hub, which also retires HA on that box.
 2.  <span class="badge badge-open">open</span> **Remote write vs read-only** — does the cloud PWA write setpoints into a *remote* site, or observe-only when remote? (Affects what the bridge carries down.) — maps to the `operator` (write) vs `viewer` (observe) role for a remote tenant.
-3.  <span class="badge badge-open">open</span> **grow-app framework** — Next vs SvelteKit; server-capable either way (BFF architecture pinned, decision 21), one service in two run-modes. The residual choice is the specific framework, not server-vs-SPA.
+3.  <span class="badge badge-decided">resolved</span> **grow-app framework — SvelteKit (Svelte 5).** Resolved by decision 25. Both finalists were server-capable (BFF pinned, decision 21); SvelteKit won on lower boilerplate, native reactivity fit for live telemetry, and lighter bundles for the Tab5. Agent Svelte-4/5 idiom-mixing is mitigated by the §14 guardrail + pinned Svelte major.
 4.  <span class="badge badge-decided">resolved</span> **Central-broker resilience** — resolved by decision 22: each site (incl. Daniel's) runs its own local broker, so the central role can co-locate now and lift later; a media-server reboot affects only aggregation/remote, never a site's local control. Still worth an explicit test once the Pi-4 lift happens.
 5.  <span class="badge badge-open">open</span> **AC Infinity takeover depth** — front the cloud as-is vs progressively replace its fan/relay role with local ESP control (ties to decision 16).
 
@@ -389,3 +390,38 @@ flowchart TB
   "Always display in console").
 - **Planes:** Tailscale (machine/MQTT bridge + fleet OTA), Pangolin/Newt
   (human remote ingress) + Keycloak (OIDC auth), media-server (central host).
+
+------------------------------------------------------------------------
+
+## 14. grow-app frontend conventions — Svelte 5 / SvelteKit
+
+Lift the block below into grow-app's `AGENTS.md` (and echo the headline in its
+README) the moment the repo is scaffolded. Its sole job is to neutralize the one
+cost of choosing Svelte (decision 25): agents trained on a blend of Svelte 4 and
+5 sometimes emit deprecated idioms that "work" in dev but aren't idiomatic and
+rot fast.
+
+!!! note "AGENTS.md — Svelte 5 guardrail (ready to lift)"
+    **Svelte 5 (runes mode) + SvelteKit only. Never mix Svelte 4 idioms.**
+    Before writing any component, confirm `svelte@^5` in `package.json`. Use only
+    the right-hand column:
+
+    | Concern | ✅ Svelte 5 | ❌ Svelte 4 (never) |
+    |---|---|---|
+    | Local reactive state | `let n = $state(0)` | bare `let n = 0` treated as reactive |
+    | Derived value | `let d = $derived(n * 2)` | `$: d = n * 2` |
+    | Side effect | `$effect(() => { … })` | `$: { … }` reactive block |
+    | Props | `let { foo } = $props()` | `export let foo` |
+    | Two-way prop | `$bindable()` | implicit `export let` binding |
+    | Event handler | `onclick={fn}` | `on:click={fn}` |
+    | Child content | `{#snippet}` + `{@render children()}` | `<slot />` |
+    | Component events | callback props | `createEventDispatcher` |
+
+    - Shared cross-component state: runes in a `.svelte.js` / `.svelte.ts` module,
+      not ad-hoc stores. `svelte/store` stays valid where a store is genuinely the
+      right tool — reach for runes first.
+    - If you catch yourself typing `$:` or `export let`, stop — that's Svelte 4.
+    - Canonical syntax source: the official Svelte 5 docs (svelte.dev/docs;
+      svelte.dev/llms.txt for an LLM-oriented dump) — not pre-2024 blog posts or
+      training-memory.
+    - Pin `svelte` to a `^5` major; never float it backward.
