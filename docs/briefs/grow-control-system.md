@@ -348,6 +348,15 @@ flowchart TB
 - <span class="badge badge-skipped">later</span> Live camera/video UI (the MLX thermal is sensor telemetry; streaming is separate).
 - <span class="badge badge-skipped">later</span> Billing / seat management beyond a Keycloak group for Greg.
 
+## 11.5. Maintenance notes
+
+- <span class="badge badge-deferred">deferred</span> **Atlas EC calibration entity
+  names before ESPHome 2026.7.0:** `configs/atlas-hydro-kit.yaml` currently has
+  `EC Cal Low (1413 µS/cm)` and `EC Cal High (5000 µS/cm)`. ESPHome 2026.5.1
+  warns that ASCII `/` is reserved as a URL path separator and auto-rewrites it
+  to Unicode fraction slash `⁄`; this becomes a hard error in ESPHome 2026.7.0.
+  Rename those labels to use `µS⁄cm` explicitly before upgrading ESPHome.
+
 ## 12. Phase plan
 
 - **Phase 0 — site broker + edge telemetry.** <span class="badge badge-decided">done</span>
