@@ -1,0 +1,19 @@
+instance:
+  public_url: https://kanban.ai.dephekt.net
+  local_url: http://containers.home.arpa:8097
+  default_url: http://containers.home.arpa:8097
+  token_op_ref: op://Agents/Kanboard/api token
+
+projects:
+  HGC:
+    name: Hydro Grow Control
+    identifier: HGC
+    description: MQTT-based multi-site hydroponic grow-control system.
+    schema: .agent/kanboard-schema.yaml
+    codeberg_repos:
+      - stackdrift/grow-fleet
+      - stackdrift-images/grow-app
+      - stackdrift/media-stack
+      - stackdrift-images/agent-working-knowledge
+    native_issue_repo_exceptions:
+      - stackdrift/esphome-components

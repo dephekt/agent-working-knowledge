@@ -1,0 +1,75 @@
+tasks:
+  - ref: HGC-001
+    title: Improve HMI scanability for 122 discovered entities
+    swimlane: Phase 1 - Site HMI polish
+    column: Backlog
+    tags: [repo:grow-app, area:ui, type:feature, priority:p0, site:daniel-home]
+    affected_repos: [grow-app]
+    rationale: The first site-mode HMI works, but 122 entities make repeated operational use too noisy.
+    requirements:
+      - Group or collapse diagnostic rows.
+      - Surface primary live readings before low-priority diagnostics.
+      - Make writable controls easier to find.
+    acceptance:
+      - Primary readings and useful controls are visible without scanning every discovered entity.
+      - Diagnostic data remains available without dominating the page.
+
+  - ref: HGC-002
+    title: Make dangerous controls visually distinct
+    swimlane: Phase 1 - Site HMI polish
+    column: Backlog
+    tags: [repo:grow-app, area:ui, area:safety, type:feature, priority:p0]
+    affected_repos: [grow-app]
+    rationale: Dangerous ESPHome actions already require confirmation, but they need clearer visual separation from routine controls.
+    requirements:
+      - Preserve server-side confirmation enforcement.
+      - Separate dangerous buttons from ordinary writable controls.
+      - Make the dangerous state readable on desktop and phone layouts.
+    acceptance:
+      - Dangerous controls are visually and spatially distinct.
+      - Existing confirmation behavior still blocks unconfirmed requests.
+
+  - ref: HGC-003
+    title: Validate Tab5 physical kiosk layout
+    swimlane: Phase 1 - Site HMI polish
+    column: Backlog
+    tags: [repo:grow-app, area:ui, type:research, priority:p1]
+    affected_repos: [grow-app]
+    rationale: Simulated desktop and phone viewports passed, but the intended kiosk hardware needs a physical acceptance pass.
+    requirements:
+      - Test on the intended Tab5 or equivalent physical kiosk device.
+      - Record touch target, viewport, scrolling, and readability notes.
+      - Convert issues into follow-up tasks when needed.
+    acceptance:
+      - Physical-device notes are captured.
+      - Any blocking kiosk ergonomics issues have follow-up tasks.
+
+  - ref: HGC-004
+    title: Add firmware update discovery from grow-fleet manifests
+    swimlane: Phase 5 - Fleet updates + history
+    column: Backlog
+    tags: [repo:grow-app, repo:grow-fleet, area:ota, area:firmware, type:feature, priority:p1]
+    affected_repos: [grow-app, grow-fleet]
+    rationale: grow-fleet now publishes durable firmware packages and manifests that grow-app should use for update discovery.
+    requirements:
+      - Compare installed controller firmware against package manifests.
+      - Show installed version to available version transitions.
+      - Reserve space for optional changelog or release-note metadata.
+    acceptance:
+      - Settings can show available updates for release devices.
+      - The design supports both local and later remote update flows.
+
+  - ref: HGC-005
+    title: Define central-mode site authorization model
+    swimlane: Phase 2 - Central / multi-tenant remote
+    column: Backlog
+    tags: [repo:grow-app, repo:media-stack, area:auth, area:multi-site, type:feature, priority:p1]
+    affected_repos: [grow-app, media-stack, agent-planning]
+    rationale: Central mode needs crisp site scope and capability rules before implementation starts.
+    requirements:
+      - Document site group to site-scope mapping.
+      - Document admin/operator/viewer behavior.
+      - Decide remote write behavior for non-admin users.
+    acceptance:
+      - OIDC claims and authorization rules are documented enough for implementation.
+      - Open remote write vs read-only decisions are explicit.

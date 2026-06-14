@@ -1,0 +1,47 @@
+columns:
+  - Inbox
+  - Backlog
+  - Ready
+  - In Progress
+  - Blocked
+  - Review
+  - Done
+
+swimlanes:
+  - Phase 0 - Site broker + edge telemetry
+  - Phase 1 - Site HMI polish
+  - Phase 2 - Central / multi-tenant remote
+  - Phase 3 - Bridges
+  - Phase 4 - Greg's site
+  - Phase 5 - Fleet updates + history
+  - Phase 6 - grow-rules
+
+tags:
+  - repo:agent-planning
+  - repo:grow-app
+  - repo:grow-fleet
+  - repo:esphome-components
+  - repo:media-stack
+  - area:ui
+  - area:mqtt
+  - area:firmware
+  - area:ota
+  - area:auth
+  - area:multi-site
+  - area:bridges
+  - area:safety
+  - area:storage
+  - area:control-loop
+  - area:ops
+  - area:docs
+  - type:feature
+  - type:bug
+  - type:research
+  - type:docs
+  - type:refactor
+  - type:ops
+  - priority:p0
+  - priority:p1
+  - priority:p2
+  - site:daniel-home
+  - site:greg-home

@@ -1,0 +1,25 @@
+projects:
+  HGC:
+    id: 1
+    name: Hydro Grow Control
+tasks:
+  HGC-001:
+    id: 1
+    project: HGC
+    title: Improve HMI scanability for 122 discovered entities
+  HGC-002:
+    id: 2
+    project: HGC
+    title: Make dangerous controls visually distinct
+  HGC-003:
+    id: 3
+    project: HGC
+    title: Validate Tab5 physical kiosk layout
+  HGC-004:
+    id: 4
+    project: HGC
+    title: Add firmware update discovery from grow-fleet manifests
+  HGC-005:
+    id: 5
+    project: HGC
+    title: Define central-mode site authorization model

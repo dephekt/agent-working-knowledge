@@ -1,0 +1,716 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import click
+import requests
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PROJECTS_FILE = ROOT / ".agent" / "kanboard-projects.yaml"
+SYNC_STATE_FILE = ROOT / ".agent" / "sync-state.yaml"
+REF_RE = re.compile(r"^(?P<prefix>[A-Z][A-Z0-9]{1,9})-[0-9]{3,}$")
+
+
+class KbError(click.ClickException):
+    pass
+
+
+@dataclass
+class Runtime:
+    config: dict[str, Any]
+    state: dict[str, Any]
+    api: "KanboardApi"
+
+
+class KanboardApi:
+    def __init__(self, url: str, token: str, username: str = "jsonrpc") -> None:
+        if not url:
+            raise KbError("Kanboard URL is missing")
+        if not token:
+            raise KbError("Kanboard API token is missing")
+        self.url = url.rstrip("/")
+        self.auth = (username, token)
+        self.next_id = 1
+
+    def call(self, method: str, params: dict[str, Any] | list[Any] | None = None) -> Any:
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "id": self.next_id}
+        self.next_id += 1
+        if params is not None:
+            payload["params"] = params
+
+        try:
+            response = requests.post(
+                f"{self.url}/jsonrpc.php",
+                json=payload,
+                auth=self.auth,
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            raise KbError(f"Kanboard API request failed: {exc}") from exc
+
+        if response.status_code == 401:
+            raise KbError("Kanboard API authentication failed")
+        if response.status_code >= 400:
+            raise KbError(f"Kanboard API returned HTTP {response.status_code}: {response.text}")
+
+        data = response.json()
+        if data.get("error"):
+            error = data["error"]
+            raise KbError(f"Kanboard API error from {method}: {error.get('message', error)}")
+        return data.get("result")
+
+
+def load_yaml(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+    return default if data is None else data
+
+
+def write_yaml(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(data, handle, sort_keys=False)
+
+
+def emit(payload: Any) -> None:
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def op_read(ref: str) -> str:
+    for binary in ("op-agent", "op"):
+        try:
+            result = subprocess.run(
+                [binary, "read", ref],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return result.stdout.strip()
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+    raise KbError(f"Unable to read 1Password reference: {ref}")
+
+
+def build_runtime() -> Runtime:
+    config = load_yaml(PROJECTS_FILE, {})
+    state = load_yaml(SYNC_STATE_FILE, {"projects": {}, "tasks": {}})
+    instance = config.get("instance", {})
+    url = (
+        os.environ.get("KANBOARD_URL")
+        or instance.get("default_url")
+        or instance.get("local_url")
+        or instance.get("public_url")
+    )
+    username = os.environ.get("KANBOARD_USER", "jsonrpc")
+    token = os.environ.get("KANBOARD_TOKEN", "")
+    token_ref = os.environ.get("KANBOARD_TOKEN_OP_REF") or instance.get("token_op_ref")
+    if not token and token_ref:
+        token = op_read(token_ref)
+    return Runtime(config=config, state=state, api=KanboardApi(url, token, username))
+
+
+def project_config(config: dict[str, Any], prefix: str) -> dict[str, Any]:
+    try:
+        project = config["projects"][prefix]
+    except KeyError as exc:
+        raise KbError(f"No Kanboard project mapping for prefix {prefix}") from exc
+    return project
+
+
+def parse_ref(config: dict[str, Any], ref: str) -> tuple[str, dict[str, Any]]:
+    match = REF_RE.match(ref)
+    if not match:
+        raise KbError(f"Invalid task reference: {ref}")
+    prefix = match.group("prefix")
+    return prefix, project_config(config, prefix)
+
+
+def get_project(api: KanboardApi, project: dict[str, Any]) -> dict[str, Any] | None:
+    result = api.call("getProjectByName", {"name": project["name"]})
+    return result or None
+
+
+def ensure_project(
+    api: KanboardApi,
+    project: dict[str, Any],
+    prefix: str,
+    dry_run: bool,
+    actions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    existing = get_project(api, project)
+    if existing:
+        return existing
+
+    action = {"action": "create_project", "prefix": prefix, "name": project["name"]}
+    actions.append(action)
+    if dry_run:
+        return None
+
+    project_id = api.call(
+        "createProject",
+        {
+            "name": project["name"],
+            "description": project.get("description", ""),
+            "identifier": project.get("identifier", prefix),
+        },
+    )
+    if not project_id:
+        raise KbError(f"Failed to create project {project['name']}")
+    return api.call("getProjectById", {"project_id": int(project_id)})
+
+
+def schema_for(project: dict[str, Any]) -> dict[str, Any]:
+    schema_path = ROOT / project.get("schema", ".agent/kanboard-schema.yaml")
+    return load_yaml(schema_path, {})
+
+
+def normalize_name(value: str) -> str:
+    return value.strip().casefold()
+
+
+def tag_names(raw_tags: Any) -> set[str]:
+    if isinstance(raw_tags, dict):
+        return {str(name) for name in raw_tags.values()}
+    if isinstance(raw_tags, list):
+        return {
+            tag["name"] if isinstance(tag, dict) and "name" in tag else str(tag)
+            for tag in raw_tags
+        }
+    return set()
+
+
+def ensure_columns(
+    api: KanboardApi,
+    project_id: int,
+    columns: list[str],
+    dry_run: bool,
+    actions: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    existing = api.call("getColumns", {"project_id": project_id}) or []
+    by_name = {normalize_name(column["title"]): column for column in existing}
+
+    if "in progress" in {normalize_name(c) for c in columns} and "in progress" not in by_name:
+        old = by_name.get("work in progress")
+        if old:
+            actions.append(
+                {
+                    "action": "rename_column",
+                    "from": old["title"],
+                    "to": "In Progress",
+                    "column_id": int(old["id"]),
+                }
+            )
+            if not dry_run:
+                api.call(
+                    "updateColumn",
+                    {"column_id": int(old["id"]), "title": "In Progress"},
+                )
+
+    existing = api.call("getColumns", {"project_id": project_id}) or []
+    by_name = {normalize_name(column["title"]): column for column in existing}
+
+    for position, title in enumerate(columns, start=1):
+        column = by_name.get(normalize_name(title))
+        if not column:
+            actions.append({"action": "add_column", "title": title, "position": position})
+            if not dry_run:
+                column_id = api.call("addColumn", {"project_id": project_id, "title": title})
+                if not column_id:
+                    raise KbError(f"Failed to add column {title}")
+                column = api.call("getColumn", {"column_id": int(column_id)})
+                by_name[normalize_name(title)] = column
+        if column and int(column.get("position", 0)) != position:
+            actions.append(
+                {
+                    "action": "move_column",
+                    "title": title,
+                    "column_id": int(column["id"]),
+                    "position": position,
+                }
+            )
+            if not dry_run:
+                api.call(
+                    "changeColumnPosition",
+                    {
+                        "project_id": project_id,
+                        "column_id": int(column["id"]),
+                        "position": position,
+                    },
+                )
+
+    existing = api.call("getColumns", {"project_id": project_id}) or []
+    return {column["title"]: column for column in existing}
+
+
+def ensure_swimlanes(
+    api: KanboardApi,
+    project_id: int,
+    swimlanes: list[str],
+    dry_run: bool,
+    actions: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    existing = api.call("getAllSwimlanes", {"project_id": project_id}) or []
+    by_name = {normalize_name(swimlane["name"]): swimlane for swimlane in existing}
+
+    for position, name in enumerate(swimlanes, start=1):
+        swimlane = by_name.get(normalize_name(name))
+        if not swimlane:
+            actions.append({"action": "add_swimlane", "name": name, "position": position})
+            if not dry_run:
+                swimlane_id = api.call(
+                    "addSwimlane", {"project_id": project_id, "name": name}
+                )
+                if not swimlane_id:
+                    raise KbError(f"Failed to add swimlane {name}")
+                swimlane = api.call("getSwimlaneById", {"swimlane_id": int(swimlane_id)})
+                by_name[normalize_name(name)] = swimlane
+        if swimlane and int(swimlane.get("position", 0)) != position:
+            actions.append(
+                {
+                    "action": "move_swimlane",
+                    "name": name,
+                    "swimlane_id": int(swimlane["id"]),
+                    "position": position,
+                }
+            )
+            if not dry_run:
+                api.call(
+                    "changeSwimlanePosition",
+                    {
+                        "project_id": project_id,
+                        "swimlane_id": int(swimlane["id"]),
+                        "position": position,
+                    },
+                )
+
+    existing = api.call("getAllSwimlanes", {"project_id": project_id}) or []
+    return {swimlane["name"]: swimlane for swimlane in existing}
+
+
+def ensure_tags(
+    api: KanboardApi,
+    project_id: int,
+    tags: list[str],
+    dry_run: bool,
+    actions: list[dict[str, Any]],
+) -> None:
+    existing = api.call("getTagsByProject", {"project_id": project_id}) or []
+    existing_names = {tag["name"] for tag in existing}
+    for tag in tags:
+        if tag not in existing_names:
+            actions.append({"action": "create_tag", "tag": tag})
+            if not dry_run:
+                tag_id = api.call("createTag", {"project_id": project_id, "tag": tag})
+                if not tag_id:
+                    raise KbError(f"Failed to create tag {tag}")
+
+
+def describe_task(task: dict[str, Any]) -> str:
+    sections: list[str] = []
+    for key, heading in [
+        ("rationale", "Rationale"),
+        ("requirements", "Requirements"),
+        ("acceptance", "Acceptance Criteria"),
+    ]:
+        value = task.get(key)
+        if not value:
+            continue
+        if isinstance(value, list):
+            body = "\n".join(f"- {item}" for item in value)
+        else:
+            body = str(value)
+        sections.append(f"## {heading}\n\n{body}")
+
+    repos = task.get("affected_repos") or []
+    if repos:
+        sections.append("## Affected Repos\n\n" + "\n".join(f"- `{repo}`" for repo in repos))
+    return "\n\n".join(sections)
+
+
+def get_task_by_ref(
+    api: KanboardApi,
+    project_id: int,
+    ref: str,
+) -> dict[str, Any] | None:
+    result = api.call(
+        "getTaskByReference", {"project_id": project_id, "reference": ref}
+    )
+    return result or None
+
+
+def ensure_task(
+    api: KanboardApi,
+    project_id: int,
+    task: dict[str, Any],
+    columns: dict[str, dict[str, Any]],
+    swimlanes: dict[str, dict[str, Any]],
+    dry_run: bool,
+    actions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    ref = task["ref"]
+    existing = get_task_by_ref(api, project_id, ref)
+    column = columns[task["column"]]
+    swimlane = swimlanes[task["swimlane"]]
+    description = describe_task(task)
+    tags = task.get("tags") or []
+
+    if not existing:
+        actions.append({"action": "create_task", "ref": ref, "title": task["title"]})
+        if dry_run:
+            return None
+        task_id = api.call(
+            "createTask",
+            {
+                "title": task["title"],
+                "project_id": project_id,
+                "column_id": int(column["id"]),
+                "swimlane_id": int(swimlane["id"]),
+                "description": description,
+                "reference": ref,
+                "tags": tags,
+            },
+        )
+        if not task_id:
+            raise KbError(f"Failed to create task {ref}")
+        existing = api.call("getTask", {"task_id": int(task_id)})
+    else:
+        updates: dict[str, Any] = {}
+        if existing.get("title") != task["title"]:
+            updates["title"] = task["title"]
+        if (existing.get("description") or "") != description:
+            updates["description"] = description
+        if updates:
+            actions.append({"action": "update_task", "ref": ref, "fields": sorted(updates)})
+            if not dry_run:
+                api.call("updateTask", {"id": int(existing["id"]), **updates})
+
+    if existing:
+        if int(existing.get("column_id", 0)) != int(column["id"]):
+            actions.append(
+                {
+                    "action": "move_task",
+                    "ref": ref,
+                    "column": task["column"],
+                    "swimlane": task["swimlane"],
+                }
+            )
+            if not dry_run:
+                api.call(
+                    "moveTaskPosition",
+                    {
+                        "project_id": project_id,
+                        "task_id": int(existing["id"]),
+                        "column_id": int(column["id"]),
+                        "position": 1,
+                        "swimlane_id": int(swimlane["id"]),
+                    },
+                )
+
+        raw_tags = api.call("getTaskTags", {"task_id": int(existing["id"])}) or []
+        current_tags = tag_names(raw_tags)
+        if set(tags) != current_tags:
+            actions.append({"action": "set_task_tags", "ref": ref, "tags": tags})
+            if not dry_run:
+                api.call(
+                    "setTaskTags",
+                    {
+                        "project_id": project_id,
+                        "task_id": int(existing["id"]),
+                        "tags": tags,
+                    },
+                )
+
+    return existing
+
+
+def resolve_ref(runtime: Runtime, ref: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    _, project = parse_ref(runtime.config, ref)
+    project_record = get_project(runtime.api, project)
+    if not project_record:
+        raise KbError(f"Kanboard project does not exist: {project['name']}")
+    task = get_task_by_ref(runtime.api, int(project_record["id"]), ref)
+    if not task:
+        raise KbError(f"Kanboard task does not exist: {ref}")
+    return project_record, task
+
+
+@click.group()
+def cli() -> None:
+    """Kanboard helper for agent-driven task workflow."""
+
+
+@cli.group()
+def project() -> None:
+    """Project commands."""
+
+
+@project.command("list")
+def project_list() -> None:
+    runtime = build_runtime()
+    emit(runtime.api.call("getAllProjects") or [])
+
+
+@cli.group()
+def board() -> None:
+    """Board commands."""
+
+
+@board.command("show")
+@click.argument("prefix")
+def board_show(prefix: str) -> None:
+    runtime = build_runtime()
+    mapped = project_config(runtime.config, prefix)
+    project_record = get_project(runtime.api, mapped)
+    if not project_record:
+        raise KbError(f"Kanboard project does not exist: {mapped['name']}")
+    emit(runtime.api.call("getBoard", {"project_id": int(project_record["id"])}) or [])
+
+
+@cli.group()
+def task() -> None:
+    """Task commands."""
+
+
+@task.command("get")
+@click.argument("ref")
+def task_get(ref: str) -> None:
+    runtime = build_runtime()
+    _, task_record = resolve_ref(runtime, ref)
+    emit(task_record)
+
+
+@task.command("create")
+@click.option("--ref", "task_ref", required=True)
+@click.option("--title", required=True)
+@click.option("--description", default="")
+@click.option("--column", default="Inbox")
+@click.option("--swimlane", default="")
+@click.option("--tag", "tags", multiple=True)
+def task_create(task_ref: str, title: str, description: str, column: str, swimlane: str, tags: tuple[str, ...]) -> None:
+    runtime = build_runtime()
+    _, mapped = parse_ref(runtime.config, task_ref)
+    project_record = get_project(runtime.api, mapped)
+    if not project_record:
+        raise KbError(f"Kanboard project does not exist: {mapped['name']}")
+    project_id = int(project_record["id"])
+    columns = {item["title"]: item for item in runtime.api.call("getColumns", {"project_id": project_id}) or []}
+    if column not in columns:
+        raise KbError(f"Unknown column: {column}")
+    swimlanes = {item["name"]: item for item in runtime.api.call("getAllSwimlanes", {"project_id": project_id}) or []}
+    swimlane_id = 0
+    if swimlane:
+        if swimlane not in swimlanes:
+            raise KbError(f"Unknown swimlane: {swimlane}")
+        swimlane_id = int(swimlanes[swimlane]["id"])
+    existing = get_task_by_ref(runtime.api, project_id, task_ref)
+    if existing:
+        emit({"created": False, "task": existing})
+        return
+    task_id = runtime.api.call(
+        "createTask",
+        {
+            "title": title,
+            "project_id": project_id,
+            "column_id": int(columns[column]["id"]),
+            "swimlane_id": swimlane_id,
+            "description": description,
+            "reference": task_ref,
+            "tags": list(tags),
+        },
+    )
+    emit({"created": True, "task_id": task_id})
+
+
+@task.command("update")
+@click.argument("ref")
+@click.option("--title")
+@click.option("--description")
+def task_update(ref: str, title: str | None, description: str | None) -> None:
+    runtime = build_runtime()
+    _, task_record = resolve_ref(runtime, ref)
+    updates = {k: v for k, v in {"title": title, "description": description}.items() if v is not None}
+    if not updates:
+        raise KbError("No updates provided")
+    result = runtime.api.call("updateTask", {"id": int(task_record["id"]), **updates})
+    emit({"updated": bool(result), "ref": ref})
+
+
+@task.command("move")
+@click.argument("ref")
+@click.option("--column", required=True)
+def task_move(ref: str, column: str) -> None:
+    runtime = build_runtime()
+    project_record, task_record = resolve_ref(runtime, ref)
+    project_id = int(project_record["id"])
+    columns = {item["title"]: item for item in runtime.api.call("getColumns", {"project_id": project_id}) or []}
+    if column not in columns:
+        raise KbError(f"Unknown column: {column}")
+    result = runtime.api.call(
+        "moveTaskPosition",
+        {
+            "project_id": project_id,
+            "task_id": int(task_record["id"]),
+            "column_id": int(columns[column]["id"]),
+            "position": 1,
+            "swimlane_id": int(task_record.get("swimlane_id", 0)),
+        },
+    )
+    emit({"moved": bool(result), "ref": ref, "column": column})
+
+
+@task.command("external-link")
+@click.argument("ref")
+@click.option("--title", required=True)
+@click.option("--url", required=True)
+def task_external_link(ref: str, title: str, url: str) -> None:
+    runtime = build_runtime()
+    _, task_record = resolve_ref(runtime, ref)
+    task_id = int(task_record["id"])
+    existing = runtime.api.call("getAllExternalTaskLinks", {"task_id": task_id}) or []
+    for link in existing:
+        if link.get("url") == url:
+            emit({"created": False, "link": link})
+            return
+    link_id = runtime.api.call(
+        "createExternalTaskLink",
+        {
+            "task_id": task_id,
+            "url": url,
+            "dependency": "weblink",
+            "type": "related",
+            "title": title,
+        },
+    )
+    emit({"created": True, "link_id": link_id})
+
+
+@task.command("link")
+@click.argument("source_ref")
+@click.argument("target_ref")
+@click.option("--type", "link_type", required=True)
+def task_link(source_ref: str, target_ref: str, link_type: str) -> None:
+    runtime = build_runtime()
+    _, source = resolve_ref(runtime, source_ref)
+    _, target = resolve_ref(runtime, target_ref)
+    link = runtime.api.call("getLinkByLabel", {"label": link_type})
+    if not link:
+        opposite = "is blocked by" if link_type == "blocks" else ""
+        link_id = runtime.api.call("createLink", {"label": link_type, "opposite_label": opposite})
+        link = runtime.api.call("getLinkById", {"link_id": int(link_id)})
+    existing = runtime.api.call("getAllTaskLinks", {"task_id": int(source["id"])}) or []
+    for item in existing:
+        if int(item.get("task_id", 0)) == int(target["id"]) and int(item.get("link_id", 0)) == int(link["id"]):
+            emit({"created": False, "link": item})
+            return
+    task_link_id = runtime.api.call(
+        "createTaskLink",
+        {
+            "task_id": int(source["id"]),
+            "opposite_task_id": int(target["id"]),
+            "link_id": int(link["id"]),
+        },
+    )
+    emit({"created": True, "task_link_id": task_link_id})
+
+
+@task.command("search")
+@click.option("--project-prefix", default="HGC")
+@click.option("--tag", "tags", multiple=True)
+@click.option("--column")
+def task_search(project_prefix: str, tags: tuple[str, ...], column: str | None) -> None:
+    runtime = build_runtime()
+    mapped = project_config(runtime.config, project_prefix)
+    project_record = get_project(runtime.api, mapped)
+    if not project_record:
+        raise KbError(f"Kanboard project does not exist: {mapped['name']}")
+    terms = [f'tag:"{tag}"' for tag in tags]
+    if column:
+        terms.append(f'column:"{column}"')
+    result = runtime.api.call(
+        "searchTasks",
+        {"project_id": int(project_record["id"]), "query": " ".join(terms)},
+    )
+    emit(result or [])
+
+
+@cli.command("sync")
+@click.argument("manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--apply", "apply_changes", is_flag=True, default=False)
+def sync(manifest: Path, dry_run: bool, apply_changes: bool) -> None:
+    if dry_run and apply_changes:
+        raise KbError("Use either --dry-run or --apply, not both")
+    if not dry_run and not apply_changes:
+        dry_run = True
+
+    runtime = build_runtime()
+    actions: list[dict[str, Any]] = []
+    manifest_data = load_yaml(manifest, {})
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in manifest_data.get("tasks", []):
+        prefix, _ = parse_ref(runtime.config, item["ref"])
+        grouped.setdefault(prefix, []).append(item)
+
+    for prefix, tasks in grouped.items():
+        mapped = project_config(runtime.config, prefix)
+        schema = schema_for(mapped)
+        project_record = ensure_project(runtime.api, mapped, prefix, dry_run, actions)
+        if dry_run and not project_record:
+            continue
+        if not project_record:
+            raise KbError(f"Unable to resolve project for prefix {prefix}")
+        project_id = int(project_record["id"])
+        runtime.state.setdefault("projects", {})[prefix] = {
+            "id": project_id,
+            "name": project_record["name"],
+        }
+
+        columns = ensure_columns(runtime.api, project_id, schema.get("columns", []), dry_run, actions)
+        swimlanes = ensure_swimlanes(runtime.api, project_id, schema.get("swimlanes", []), dry_run, actions)
+        all_tags = list(schema.get("tags", []))
+        for task_item in tasks:
+            for tag in task_item.get("tags", []) or []:
+                if tag not in all_tags:
+                    all_tags.append(tag)
+        ensure_tags(runtime.api, project_id, all_tags, dry_run, actions)
+
+        for task_item in tasks:
+            task_record = ensure_task(
+                runtime.api,
+                project_id,
+                task_item,
+                columns,
+                swimlanes,
+                dry_run,
+                actions,
+            )
+            if task_record:
+                runtime.state.setdefault("tasks", {})[task_item["ref"]] = {
+                    "id": int(task_record["id"]),
+                    "project": prefix,
+                    "title": task_item["title"],
+                }
+
+    if apply_changes:
+        write_yaml(SYNC_STATE_FILE, runtime.state)
+
+    emit({"dry_run": dry_run, "actions": actions, "state_file": str(SYNC_STATE_FILE)})
+
+
+if __name__ == "__main__":
+    try:
+        cli()
+    except KbError as exc:
+        raise exc

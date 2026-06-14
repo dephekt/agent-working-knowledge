@@ -1,2 +1,5 @@
 mkdocs==1.6.1
 mkdocs-material==9.5.49
+click==8.1.6
+PyYAML==6.0.1
+requests==2.31.0
