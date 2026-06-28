@@ -17,8 +17,8 @@ docs system.
     ---
 
     MQTT-based, multi-site grow control system (moving off Home Assistant):
-    autonomous per-site control islands bridged to a central hub for analytics,
-    fleet management, and remote SSO access.
+    autonomous per-site control islands with local history and app-owned auth;
+    central infrastructure provides only replaceable remote access and identity.
 
     Status: **Phase 1 deployed locally + site OTA shipped** · Lead: Daniel
 
@@ -36,10 +36,11 @@ docs system.
 
     ---
 
-    Penpot-led workflow for comparing HMI overview/settings concepts before
-    implementing the selected direction in grow-app.
+    Mission Control direction for the next grow-app HMI iteration: dark
+    instrument-panel dashboard, curated settings panels, local Influx-backed
+    history trends, and substrate/Pulse-class sensing roadmap placeholders.
 
-    Status: **workflow scaffolded** · Lead: Daniel
+    Status: **Mission Control direction selected** · Lead: Daniel
 
 </div>
 

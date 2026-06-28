@@ -46,6 +46,20 @@ stable/edge channel, serves the local ESPHome update manifest and
 checksum-validated binary proxy, and publishes the non-retained MQTT update
 command from Device Settings.
 
+The next HMI iteration is the Mission Control redesign tracked in
+[Grow app UI redesign workflow](grow-app-ui-redesign.md). That work is
+post-Phase-1 polish and expansion: it should reuse the shipped Phase 1
+MQTT/SSE/current-state architecture first, then add history, trends, and
+substrate/Pulse-class surfaces only after their backing contracts exist.
+
+The next architecture step after Phase 1 is no longer a separate central grow
+console. Each site remains its own grow-app deployment. Remote access should
+route to the same site app at `<site-slug>.grow.dephekt.net`, while grow-app
+itself owns login, OIDC callbacks, local sessions, bootstrap admin access, and
+local fallback passwords. Time-series history also belongs beside the site app:
+InfluxDB plus a local MQTT history recorder, queried through grow-app server
+routes.
+
 ## Done
 
 - Site-mode SvelteKit/Svelte 5 app scaffolded and deployed on LAN port `3080`.
@@ -67,10 +81,13 @@ command from Device Settings.
   operations overview stays scan-friendly as entity counts grow.
 - Validate the physical Tab5/kiosk ergonomics with real touch use, not only
   simulated viewports.
-- Design the next overview/settings iteration in Penpot before larger HMI code
-  changes; see [Grow app UI redesign workflow](grow-app-ui-redesign.md).
-- Implement central/remote mode, OIDC authorization, multi-site tenancy,
-  history, AC Infinity/Pulse bridges, and `grow-rules` in later phases.
+- Implement the Mission Control overview/settings direction from
+  [Grow app UI redesign workflow](grow-app-ui-redesign.md), starting with the
+  visual system and curated settings surfaces that can run on today's retained
+  MQTT snapshot.
+- Implement app-owned auth, per-site remote access, local InfluxDB history,
+  AC Infinity/Pulse bridges, substrate sensing, and `grow-rules` in later
+  phases.
 - Keep firmware-update follow-ups separate from HGC-4: HGC-18 tracks edge
   publish path filters/concurrency, and HGC-19 tracks custom ESPHome update
   install payload support.
@@ -98,9 +115,9 @@ command from Device Settings.
 
 ## Out of Scope
 
-- Central mode and `grow.dephekt.net`.
-- Keycloak/OIDC, multi-site tenancy, and remote user authorization.
-- InfluxDB/history.
+- App-owned login, per-site OIDC clients, local fallback passwords, and remote
+  access through `<site-slug>.grow.dephekt.net`.
+- Time-series history and charts backed by local InfluxDB.
 - AC Infinity and Pulse bridges.
 - `grow-rules`.
 - Retained app command publishes. Phase 1 command publishes are not retained;
@@ -199,7 +216,8 @@ curl http://<media-server-LAN-IP>:3080/health
 
 Acceptance:
 
-- App loads on LAN without Keycloak.
+- App loads on LAN without Keycloak in Phase 1. A later auth phase intentionally
+  changes this to app-owned login with local fallback credentials.
 - AtomS3U and Atlas appear from discovery.
 - Retained state renders immediately on load.
 - SSE updates live values without a page refresh.
@@ -259,9 +277,9 @@ Priority order before larger Phase 2 work:
 ## Remaining firmware update backlog
 
 - Site-mode Settings -> Device updates is implemented for per-device updates.
-- Future central/remote mode should delegate update operations to the target
-  site's local app/hub rather than requiring the browser to reach controllers
-  directly.
+- Future remote access should reach the target site's grow-app through the
+  public site hostname. Update operations stay mediated by that local app/hub
+  rather than requiring the browser to reach controllers directly.
 - HGC-18: add grow-fleet edge publish path filters and a concurrency guard.
 - HGC-19: support custom ESPHome update install payloads if a future device
   exposes one instead of the default `INSTALL`.
